@@ -848,6 +848,7 @@ async def send_voice_channel_panel(channel, owner):
     # Przyciski
     limit_button = discord.ui.Button(label="👥 Ustaw limit", style=discord.ButtonStyle.secondary, custom_id="temp_limit")
     lock_button = discord.ui.Button(label="🔒 Zamknij kanał", style=discord.ButtonStyle.secondary, custom_id="temp_lock")
+    invite_button = discord.ui.Button(label="🔓 Zaproś", style=discord.ButtonStyle.secondary, custom_id="temp_invite")
     block_button = discord.ui.Button(label="🚫 Blokuj użytkownika", style=discord.ButtonStyle.secondary, custom_id="temp_block")
     unblock_button = discord.ui.Button(label="✅ Odblokuj użytkownika", style=discord.ButtonStyle.secondary, custom_id="temp_unblock")
     delete_button = discord.ui.Button(label="🗑️ Usuń kanał", style=discord.ButtonStyle.danger, custom_id="temp_delete")
@@ -863,6 +864,12 @@ async def send_voice_channel_panel(channel, owner):
             await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
             return
         await toggle_lock(interaction, channel)
+    
+    async def invite_callback(interaction):
+        if interaction.user.id != owner.id:
+            await interaction.response.send_message("❌ Tylko właściciel kanału może zapraszać!", ephemeral=True)
+            return
+        await show_invite_modal(interaction, channel)
     
     async def block_callback(interaction):
         if interaction.user.id != owner.id:
@@ -885,12 +892,14 @@ async def send_voice_channel_panel(channel, owner):
     
     limit_button.callback = limit_callback
     lock_button.callback = lock_callback
+    invite_button.callback = invite_callback
     block_button.callback = block_callback
     unblock_button.callback = unblock_callback
     delete_button.callback = delete_callback
     
     view.add_item(limit_button)
     view.add_item(lock_button)
+    view.add_item(invite_button)
     view.add_item(block_button)
     view.add_item(unblock_button)
     view.add_item(delete_button)
@@ -933,8 +942,64 @@ async def show_limit_modal(interaction, channel):
     modal.on_submit = modal_callback
     await interaction.response.send_modal(modal)
 
+async def show_invite_modal(interaction, channel):
+    """Pokazuje modal do zaproszenia użytkownika na kanał"""
+    modal = discord.ui.Modal(title="Zaproś użytkownika")
+    modal.add_item(discord.ui.TextInput(
+        label="Nazwa lub ID użytkownika",
+        placeholder="Wpisz nazwę lub ID",
+        required=True,
+        max_length=100
+    ))
+    
+    async def modal_callback(modal_interaction):
+        query = modal.children[0].value
+        user = None
+        
+        # Spróbuj znaleźć użytkownika
+        if query.isdigit():
+            user = channel.guild.get_member(int(query))
+        else:
+            for member in channel.guild.members:
+                if query.lower() in member.name.lower():
+                    user = member
+                    break
+        
+        if not user:
+            await modal_interaction.response.send_message("❌ Nie znaleziono użytkownika!", ephemeral=True)
+            return
+        
+        # Sprawdź czy użytkownik nie jest zablokowany
+        temp_channels = load_temp_channels()
+        guild_id = str(channel.guild.id)
+        channel_id = str(channel.id)
+        
+        if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+            if user.id in temp_channels[guild_id][channel_id].get("blocked_users", []):
+                await modal_interaction.response.send_message("❌ Ten użytkownik jest zablokowany na kanale!", ephemeral=True)
+                return
+        
+        # Wyślij zaproszenie na PW
+        try:
+            invite_link = f"https://discord.com/channels/{channel.guild.id}/{channel.id}"
+            embed = discord.Embed(
+                title="🔓 Zaproszenie na kanał głosowy",
+                description=f"Użytkownik {interaction.user.mention} zaprasza Cię na kanał **{channel.name}**",
+                color=0x5865f2
+            )
+            embed.add_field(name="📌 Link do kanału", value=f"[Kliknij tutaj, aby dołączyć]({invite_link})", inline=False)
+            embed.set_footer(text="Po kliknięciu zostaniesz przeniesiony na kanał")
+            
+            await user.send(embed=embed)
+            await modal_interaction.response.send_message(f"✅ Zaproszenie wysłane do {user.mention}!", ephemeral=True)
+        except:
+            await modal_interaction.response.send_message("❌ Nie udało się wysłać zaproszenia (użytkownik ma wyłączone PW).", ephemeral=True)
+    
+    modal.on_submit = modal_callback
+    await interaction.response.send_modal(modal)
+
 async def toggle_lock(interaction, channel):
-    """Zamyka/otwiera kanał"""
+    """Zamyka/otwiera kanał i aktualizuje przycisk"""
     temp_channels = load_temp_channels()
     guild_id = str(channel.guild.id)
     channel_id = str(channel.id)
@@ -952,6 +1017,7 @@ async def toggle_lock(interaction, channel):
             await channel.set_permissions(channel.guild.default_role, connect=True)
             await interaction.response.send_message("🔓 Kanał został **otwarty**!", ephemeral=True)
         
+        # Zaktualizuj panel (przycisk się zmieni)
         await update_panel(channel)
 
 async def show_block_modal(interaction, channel):
@@ -968,7 +1034,6 @@ async def show_block_modal(interaction, channel):
         query = modal.children[0].value
         user = None
         
-        # Spróbuj znaleźć użytkownika
         if query.isdigit():
             user = channel.guild.get_member(int(query))
         else:
@@ -1000,6 +1065,9 @@ async def show_block_modal(interaction, channel):
             
             await modal_interaction.response.send_message(f"✅ Zablokowano {user.mention} na kanale!", ephemeral=True)
             await update_panel(channel)
+    
+    modal.on_submit = modal_callback
+    await interaction.response.send_modal(modal)
 
 async def show_unblock_modal(interaction, channel):
     """Pokazuje modal do odblokowywania użytkownika"""
@@ -1039,6 +1107,9 @@ async def show_unblock_modal(interaction, channel):
             await channel.set_permissions(user, connect=None)
             await modal_interaction.response.send_message(f"✅ Odblokowano {user.mention} na kanale!", ephemeral=True)
             await update_panel(channel)
+    
+    modal.on_submit = modal_callback
+    await interaction.response.send_modal(modal)
 
 async def update_panel(channel):
     """Aktualizuje panel zarządzania na kanale (wysyła nowy, usuwa stary)"""
@@ -1048,13 +1119,15 @@ async def update_panel(channel):
     
     limit = "brak"
     status = "otwarty"
+    is_locked = False
     
     if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
         data = temp_channels[guild_id][channel_id]
         limit = data.get("limit", 0)
         if limit == 0:
             limit = "brak"
-        status = "zamknięty" if data.get("locked", False) else "otwarty"
+        is_locked = data.get("locked", False)
+        status = "zamknięty" if is_locked else "otwarty"
     
     # Znajdź wiadomość panelu (ostatnia od bota na kanale)
     async for msg in channel.history(limit=10):
@@ -1073,7 +1146,14 @@ async def update_panel(channel):
     view = discord.ui.View(timeout=None)
     
     limit_button = discord.ui.Button(label="👥 Ustaw limit", style=discord.ButtonStyle.secondary, custom_id="temp_limit")
-    lock_button = discord.ui.Button(label="🔒 Zamknij kanał", style=discord.ButtonStyle.secondary, custom_id="temp_lock")
+    
+    # Przycisk zamykania/otwierania – zmienia się w zależności od stanu
+    if is_locked:
+        lock_button = discord.ui.Button(label="🔓 Otwórz kanał", style=discord.ButtonStyle.secondary, custom_id="temp_lock")
+    else:
+        lock_button = discord.ui.Button(label="🔒 Zamknij kanał", style=discord.ButtonStyle.secondary, custom_id="temp_lock")
+    
+    invite_button = discord.ui.Button(label="🔓 Zaproś", style=discord.ButtonStyle.secondary, custom_id="temp_invite")
     block_button = discord.ui.Button(label="🚫 Blokuj użytkownika", style=discord.ButtonStyle.secondary, custom_id="temp_block")
     unblock_button = discord.ui.Button(label="✅ Odblokuj użytkownika", style=discord.ButtonStyle.secondary, custom_id="temp_unblock")
     delete_button = discord.ui.Button(label="🗑️ Usuń kanał", style=discord.ButtonStyle.danger, custom_id="temp_delete")
@@ -1089,6 +1169,12 @@ async def update_panel(channel):
             await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
             return
         await toggle_lock(interaction, channel)
+    
+    async def invite_cb(interaction):
+        if interaction.user.id != owner.id:
+            await interaction.response.send_message("❌ Tylko właściciel kanału może zapraszać!", ephemeral=True)
+            return
+        await show_invite_modal(interaction, channel)
     
     async def block_cb(interaction):
         if interaction.user.id != owner.id:
@@ -1111,12 +1197,14 @@ async def update_panel(channel):
     
     limit_button.callback = limit_cb
     lock_button.callback = lock_cb
+    invite_button.callback = invite_cb
     block_button.callback = block_cb
     unblock_button.callback = unblock_cb
     delete_button.callback = delete_cb
     
     view.add_item(limit_button)
     view.add_item(lock_button)
+    view.add_item(invite_button)
     view.add_item(block_button)
     view.add_item(unblock_button)
     view.add_item(delete_button)
@@ -1143,18 +1231,92 @@ async def delete_temp_channel(channel):
     except:
         pass
 
-# Dodaj obsługę przycisków w on_interaction
+# Obsługa interakcji dla tymczasowych kanałów
 @bot.event
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.component:
         custom_id = interaction.data["custom_id"]
         
-        # ... istniejące już warunki (tickety, weryfikacja itp.) ...
+        # Obsługa przycisków tymczasowych kanałów (przekierowanie do odpowiednich funkcji)
+        if custom_id == "temp_limit":
+            # Pobierz kanał z interakcji
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await show_limit_modal(interaction, channel)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
         
-        # Obsługa przycisków tymczasowych kanałów
-        if custom_id in ["temp_limit", "temp_lock", "temp_block", "temp_unblock", "temp_delete"]:
-            # Te przyciski są obsługiwane wewnątrz view, ale na wszelki wypadek
-            pass
+        elif custom_id == "temp_lock":
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await toggle_lock(interaction, channel)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
+        
+        elif custom_id == "temp_invite":
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await show_invite_modal(interaction, channel)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może zapraszać!", ephemeral=True)
+        
+        elif custom_id == "temp_block":
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await show_block_modal(interaction, channel)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
+        
+        elif custom_id == "temp_unblock":
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await show_unblock_modal(interaction, channel)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
+        
+        elif custom_id == "temp_delete":
+            channel = interaction.channel
+            if isinstance(channel, discord.VoiceChannel):
+                temp_channels = load_temp_channels()
+                guild_id = str(channel.guild.id)
+                channel_id = str(channel.id)
+                if guild_id in temp_channels and channel_id in temp_channels[guild_id]:
+                    owner_id = temp_channels[guild_id][channel_id]["owner_id"]
+                    if interaction.user.id == owner_id:
+                        await delete_temp_channel(channel)
+                        await interaction.response.send_message("🗑️ Kanał został usunięty!", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("❌ Tylko właściciel kanału może to zrobić!", ephemeral=True)
 
 if __name__ == "__main__":
     try:
